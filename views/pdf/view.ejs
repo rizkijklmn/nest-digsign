@@ -1,0 +1,163 @@
+<!-- views/pdf/view.ejs -->
+
+<!DOCTYPE html>
+<html>
+<head>
+  <title>PDF Signature</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.9.179/pdf.min.js"></script>
+  <style>
+    #pdfContainer { position: relative; display: inline-block; }
+    #pdfCanvas { border: 1px solid black; }
+    #signatureWrapper {
+      position: absolute;
+      display: inline-block;
+      border: 2px dashed #666;
+      background: rgba(255,255,255,0.3);
+      cursor: move;
+    }
+    #signature {
+      width: 150px;
+      height: auto;
+      display: block;
+    }
+    .resize-handle {
+      position: absolute;
+      width: 12px;
+      height: 12px;
+      bottom: -6px;
+      right: -6px;
+      background: #666;
+      cursor: se-resize;
+    }
+  </style>
+</head>
+<body>
+  <h2>Upload PDF dan Geser Tanda Tangan</h2>
+  <input type="file" id="pdfInput" accept="application/pdf" />
+  <div id="pdfContainer">
+    <canvas id="pdfCanvas"></canvas>
+    <div id="signatureWrapper" style="left:0; top:0;">
+      <img id="signature" src="<%= signatureBase64 %>" />
+      <div class="resize-handle"></div>
+    </div>
+  </div>
+  <br>
+  <button id="saveBtn" style="margin-top: 20px;">Save Signature</button>
+
+  <script>
+    const pdfInput = document.getElementById("pdfInput");
+    const canvas = document.getElementById("pdfCanvas");
+    const ctx = canvas.getContext("2d");
+    const sigWrapper = document.getElementById("signatureWrapper");
+    const signature = document.getElementById("signature");
+    const resizeHandle = document.querySelector(".resize-handle");
+
+    let pdfDoc = null;
+    let scale = 1.5;  // PDF render scale
+    let viewport = null;
+
+    // --- Drag signature ---
+    let isDragging = false, dragOffsetX, dragOffsetY;
+    sigWrapper.addEventListener("mousedown", e => {
+      if (e.target === resizeHandle) return; // jangan ganggu resize
+      isDragging = true;
+      dragOffsetX = e.offsetX;
+      dragOffsetY = e.offsetY;
+    });
+    document.addEventListener("mouseup", () => isDragging = false);
+    document.addEventListener("mousemove", e => {
+      if (isDragging) {
+        const rect = canvas.getBoundingClientRect();
+        let x = e.clientX - rect.left - dragOffsetX;
+        let y = e.clientY - rect.top - dragOffsetY;
+        // Biar tetap dalam canvas
+        x = Math.max(0, Math.min(x, rect.width - sigWrapper.offsetWidth));
+        y = Math.max(0, Math.min(y, rect.height - sigWrapper.offsetHeight));
+        sigWrapper.style.left = x + "px";
+        sigWrapper.style.top = y + "px";
+      }
+    });
+
+    // --- Resize signature ---
+    let isResizing = false, startX, startY, startWidth, startHeight;
+    resizeHandle.addEventListener("mousedown", e => {
+      e.stopPropagation();
+      isResizing = true;
+      startX = e.clientX;
+      startY = e.clientY;
+      startWidth = sigWrapper.offsetWidth;
+      startHeight = sigWrapper.offsetHeight;
+    });
+    document.addEventListener("mouseup", () => isResizing = false);
+    document.addEventListener("mousemove", e => {
+      if (isResizing) {
+        const dx = e.clientX - startX;
+        const dy = e.clientY - startY;
+        let newWidth = Math.max(30, startWidth + dx); // minimal 30px
+        let newHeight = (newWidth / signature.naturalWidth) * signature.naturalHeight;
+        signature.style.width = newWidth + "px";
+        signature.style.height = newHeight + "px";
+        sigWrapper.style.width = newWidth + "px";
+        sigWrapper.style.height = newHeight + "px";
+      }
+    });
+
+    // --- Render PDF ---
+    pdfInput.addEventListener("change", async (e) => {
+      const file = e.target.files[0];
+      const reader = new FileReader();
+      reader.onload = async function() {
+        const typedarray = new Uint8Array(this.result);
+        pdfDoc = await pdfjsLib.getDocument(typedarray).promise;
+        const page = await pdfDoc.getPage(1);
+        viewport = page.getViewport({ scale });
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        await page.render({ canvasContext: ctx, viewport }).promise;
+      };
+      reader.readAsArrayBuffer(file);
+    });
+
+    // --- Save ke backend ---
+    document.getElementById("saveBtn").addEventListener("click", async () => {
+      if (!pdfDoc) {
+        alert("Upload PDF dulu!");
+        return;
+      }
+
+      const rect = canvas.getBoundingClientRect();
+      const sigRect = sigWrapper.getBoundingClientRect();
+
+      // Posisi relatif ke canvas (px di layar)
+      const xPx = sigRect.left - rect.left;
+      const yPx = sigRect.top - rect.top;
+      const wPx = sigRect.width;
+      const hPx = sigRect.height;
+
+      // Konversi ke koordinat PDF asli
+      const x = xPx / scale;
+      const y = yPx / scale;
+      const w = wPx / scale;
+      const h = hPx / scale;
+
+      const formData = new FormData();
+      formData.append("pdf", pdfInput.files[0]);
+      formData.append("page", "0"); // halaman pertama
+      formData.append("x", x);
+      formData.append("y", y);
+      formData.append("w", w);
+      formData.append("h", h);
+      formData.append("imageBase64", signature.src);
+
+      const res = await fetch("/pdf/stamp-sign", {
+        method: "POST",
+        body: formData
+      });
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      window.open(url); // buka hasil PDF
+    });
+  </script>
+</body>
+</html>
